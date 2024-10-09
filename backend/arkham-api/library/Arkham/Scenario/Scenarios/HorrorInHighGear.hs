@@ -8,6 +8,7 @@ import Arkham.Card
 import Arkham.Direction
 import Arkham.EncounterSet qualified as Set
 import Arkham.Helpers.Query (getLead, getPlayerCount)
+import Arkham.Investigator.Types (Field (..))
 import Arkham.Location.Cards qualified as Locations
 import Arkham.Matcher hiding (assetAt)
 import Arkham.Message.Lifted.Choose
@@ -40,10 +41,12 @@ horrorInHighGear difficulty =
 
 instance HasChaosTokenValue HorrorInHighGear where
   getChaosTokenValue iid tokenFace (HorrorInHighGear attrs) = case tokenFace of
-    Skull -> pure $ toChaosTokenValue attrs Skull 3 5
-    Cultist -> pure $ ChaosTokenValue Cultist NoModifier
-    Tablet -> pure $ ChaosTokenValue Tablet NoModifier
-    ElderThing -> pure $ ChaosTokenValue ElderThing NoModifier
+    Skull -> do
+      useHigher <- (<= 6) . length <$> getRoadDeck
+      pure $ toChaosTokenValue attrs Skull (if useHigher then 3 else 1) (if useHigher then 4 else 2)
+    Cultist -> pure $ toChaosTokenValue attrs Cultist 1 2
+    Tablet -> pure $ toChaosTokenValue attrs Tablet 2 3
+    ElderThing -> pure $ ChaosTokenValue ElderThing (NegativeModifier 4)
     otherFace -> getChaosTokenValue iid otherFace attrs
 
 instance RunMessage HorrorInHighGear where
@@ -140,5 +143,44 @@ instance RunMessage HorrorInHighGear where
           questionLabeled "Where will the enemy spawn?"
           targets locations $ createEnemyAt_ card
         push unfocus
+      pure s
+    FailedSkillTest iid _ _ (ChaosTokenTarget token) _ n -> do
+      case token.face of
+        Cultist | n > 0 -> do
+          field InvestigatorPlacement iid >>= \case
+            InVehicle aid -> do
+              loc <- fieldJust AssetLocation aid
+              passengers <-
+                selectWithField InvestigatorClues $ InVehicleMatching (AssetWithId aid) <> InvestigatorWithAnyClues
+              case passengers of
+                [] -> pure ()
+                [(x, c)] -> placeClues x loc (min c n)
+                xs ->
+                  if sum (map snd xs) <= n
+                    then for_ xs \(x, c) -> placeClues x loc c
+                    else chooseNM iid n do
+                      for_ xs \(x, _c) -> clueLabeled x $ placeClues x loc 1
+            _ -> pure ()
+        Tablet | n > 0 -> do
+          field InvestigatorPlacement iid >>= \case
+            InVehicle aid -> do
+              passengers <-
+                selectWithField InvestigatorResources
+                  $ InVehicleMatching (AssetWithId aid)
+                  <> InvestigatorWithAnyResources
+              case passengers of
+                [] -> pure ()
+                [(x, r)] -> loseResources x Tablet (min n r)
+                xs ->
+                  if sum (map snd xs) <= n
+                    then for_ xs \(x, c) -> loseResources x Tablet c
+                    else chooseNM iid n do
+                      for_ xs \(x, _c) -> resourceLabeled x $ loseResources x Tablet 1
+            _ -> pure ()
+        ElderThing | isEasyStandard attrs -> push HuntersMove
+        _ -> pure ()
+      pure s
+    ResolveChaosToken _ ElderThing _iid -> do
+      when (isHardExpert attrs) $ push HuntersMove
       pure s
     _ -> HorrorInHighGear <$> liftRunMessage msg attrs
